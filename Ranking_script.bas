@@ -24,11 +24,9 @@ interface PlayerStats {
  * and refreshes all winrate matrices, including rank change calculation.
  */
 function main(workbook: ExcelScript.Workbook) {
-  // 1. Get necessary sheet references
-  const matches = workbook.getWorksheet("Matches Log");
-  const ratings = workbook.getWorksheet("Leaderboard");
-  const playersDataSheet = workbook.getWorksheet("Challengers cards");
-  const definition = workbook.getWorksheet("Definition");
+
+    // Ensure all prerequisites (sheets, headers, and Winrates matrices layout)
+  const { matches, ratings, playersDataSheet, definition, winrates } = ensurePrerequisites(workbook);
 
   if (!matches || !ratings || !playersDataSheet || !definition) {
     console.log("One or more required sheets are missing.");
@@ -48,6 +46,219 @@ function main(workbook: ExcelScript.Workbook) {
 
   // 5. Update the country, team, and role winrate matrices
   updateAllWinratesMatrices(workbook);
+}
+
+/** =========================
+ *  PREREQUISITE ENFORCERS
+ *  ========================= */
+function ensurePrerequisites(workbook: ExcelScript.Workbook) {
+  const matches = getOrCreateSheet(workbook, "Matches Log");
+  const ratings = getOrCreateSheet(workbook, "Leaderboard");
+  const players = getOrCreateSheet(workbook, "Challengers cards");
+  const definition = getOrCreateSheet(workbook, "Definition");
+  const winrates = getOrCreateSheet(workbook, "Winrates");
+
+  ensureMatchesLogStructure(matches);          // headers for Matches Log
+  ensureLeaderboardStructure(ratings);         // headers for Leaderboard
+  ensureChallengersCardsStructure(players);    // headers for Challengers cards
+
+  // Build/refresh the Winrates grid layout using the latest labels from Challengers cards
+  rebuildWinratesLayoutFromChallengersCards(winrates, players);
+
+  return { matches, ratings, playersDataSheet: players, definition, winrates };
+}
+
+function getOrCreateSheet(workbook: ExcelScript.Workbook, name: string): ExcelScript.Worksheet {
+  const found = workbook.getWorksheet(name);
+  if (found) return found;
+  const ws = workbook.addWorksheet(name);
+  // Keep the new sheet at the end. Optionally move/format here if you wish.
+  return ws;
+}
+
+/** ---- Structures & Headers ---- */
+
+function ensureLeaderboardStructure(ratings: ExcelScript.Worksheet) {
+  const requiredHeaders = [
+    "Ranking",
+    "Challenger",
+    "Nationality",
+    "Team",
+    "Role",
+    "Game played",
+    "ELO",
+    "Participation Penalization",
+    "Winrate",
+  ];
+
+  // Place them in row 1 (zero-based row 0), any order is fine, but we’ll set a standard order
+  // (Your downstream code finds by header text anyway.)
+  const headerRow = 0;
+  for (let i = 0; i < requiredHeaders.length; i++) {
+    ratings.getCell(headerRow, i).setValue(requiredHeaders[i]);
+  }
+
+  // Optional formatting for readability
+  const headerRange = ratings.getRangeByIndexes(headerRow, 0, 1, requiredHeaders.length);
+  headerRange.getFormat().getFont().setBold(true);
+}
+
+function ensureMatchesLogStructure(matches: ExcelScript.Worksheet) {
+  // Headers expected by your script logic:
+  // A: Date (Excel serial), B: Player A, C: Player B, D: Points A, E: Points B, F: Winner
+  // (The script writes Elo delta for Player A into column I.)
+  const headers = ["Date", "Player A", "Player B", "Points A", "Points B", "Winner", "", "", "Elo Δ (abs A)"];
+  const headerRow = 0;
+  for (let i = 0; i < headers.length; i++) {
+    if (headers[i]) matches.getCell(headerRow, i).setValue(headers[i]);
+  }
+  const headerRange = matches.getRangeByIndexes(headerRow, 0, 1, headers.length);
+  headerRange.getFormat().getFont().setBold(true);
+}
+
+function ensureChallengersCardsStructure(players: ExcelScript.Worksheet) {
+  // A: Player, B: Nationality, C: Team, D: Role
+  const headers = ["Player", "Nationality", "Team", "Role"];
+  const headerRow = 0;
+  for (let i = 0; i < headers.length; i++) {
+    players.getCell(headerRow, i).setValue(headers[i]);
+  }
+  const headerRange = players.getRangeByIndexes(headerRow, 0, 1, headers.length);
+  headerRange.getFormat().getFont().setBold(true);
+}
+
+/** ---- Winrates layout rebuild (labels from Challengers cards) ----
+ * This function creates the exact header footprints expected by your update functions:
+ *  Countries:
+ *    - Column headers: row 2, B..N        (0-based row=1, cols 1..13) => up to 13 countries
+ *    - Row headers: A3, A5, …, A27        (0-based rows 2..27 step 2) => up to 13 countries
+ *  Teams:
+ *    - Column headers: row 32, B..H       (0-based row=31, cols 1..7)  => up to 7 teams
+ *    - Row headers: A33, A35, …, A46      (0-based rows 32..45 step 2) => up to 7 teams
+ *  Roles:
+ *    - Column headers: row 50, B..I       (0-based row=49, cols 1..8)  => up to 8 roles
+ *    - Row headers: A51, A53, …, A66      (0-based rows 50..65 step 2) => up to 8 roles
+ *
+ * If there are more unique labels than the capacity, they are truncated.
+ * Unused header slots (if fewer labels) are cleared.
+ */
+function rebuildWinratesLayoutFromChallengersCards(
+  winrates: ExcelScript.Worksheet,
+  players: ExcelScript.Worksheet
+) {
+  // Read players table
+  const used = players.getUsedRange();
+  const values = used ? used.getValues() : [];
+  // Expect headers at row 0: ["Player","Nationality","Team","Role"]
+  const rows = values.slice(1); // data rows
+
+  const countries = distinctNonEmpty(rows.map(r => String(r[1] ?? "").trim()));
+  const teams     = distinctNonEmpty(rows.map(r => String(r[2] ?? "").trim()));
+  const roles     = distinctNonEmpty(rows.map(r => String(r[3] ?? "").trim()));
+
+  // Sort for stable layout (optional)
+  countries.sort((a, b) => a.localeCompare(b));
+  teams.sort((a, b) => a.localeCompare(b));
+  roles.sort((a, b) => a.localeCompare(b));
+
+  // Build each block
+  writeWinrateBlock(
+    winrates,
+    /*colHeaderRow*/ 1, /*colHeaderStartCol*/ 1, /*maxCols*/ 13,
+    /*rowHeaderStartRow*/ 2, /*rowHeaderStep*/ 2, /*maxRows*/ 13,
+    countries
+  );
+
+  writeWinrateBlock(
+    winrates,
+    /*colHeaderRow*/ 31, /*colHeaderStartCol*/ 1, /*maxCols*/ 7,
+    /*rowHeaderStartRow*/ 32, /*rowHeaderStep*/ 2, /*maxRows*/ 7,
+    teams
+  );
+
+  writeWinrateBlock(
+    winrates,
+    /*colHeaderRow*/ 49, /*colHeaderStartCol*/ 1, /*maxCols*/ 8,
+    /*rowHeaderStartRow*/ 50, /*rowHeaderStep*/ 2, /*maxRows*/ 8,
+    roles
+  );
+}
+
+/** Writes a single winrate matrix header block and clears the interior cells */
+function writeWinrateBlock(
+  ws: ExcelScript.Worksheet,
+  colHeaderRow: number,
+  colHeaderStartCol: number,
+  maxCols: number,
+  rowHeaderStartRow: number,
+  rowHeaderStep: number,
+  maxRows: number,
+  labels: string[]
+) {
+  // Truncate or pad labels to the maximum supported
+  const labelsCapped = labels.slice(0, Math.min(maxCols, maxRows));
+
+  // 1) Column headers (B.. as specified)
+  for (let i = 0; i < maxCols; i++) {
+    const cell = ws.getCell(colHeaderRow, colHeaderStartCol + i);
+    if (i < labelsCapped.length) {
+      cell.setValue(labelsCapped[i]);
+    } else {
+      cell.clear(ExcelScript.ClearApplyTo.contents);
+    }
+    // Optional: bold
+    cell.getFormat().getFont().setBold(true);
+  }
+
+  // 2) Row headers (A3, A5, ...)
+  for (let r = 0; r < maxRows; r++) {
+    const rowIndex = rowHeaderStartRow + r * rowHeaderStep;
+    const cell = ws.getCell(rowIndex, 0);
+    if (r < labelsCapped.length) {
+      cell.setValue(labelsCapped[r]);
+      cell.getFormat().getFont().setBold(true);
+    } else {
+      // Clear both the header cell and its paired "wins/losses" rows
+      cell.clear(ExcelScript.ClearApplyTo.contents);
+    }
+  }
+
+  // 3) Clear interior matrix cells and fills in the footprint
+  //    For each row header, there are two rows (wins/losses)
+  for (let r = 0; r < maxRows; r++) {
+    const topRow = rowHeaderStartRow + r * rowHeaderStep;
+    const hasLabel = r < labelsCapped.length;
+
+    for (let c = 0; c < maxCols; c++) {
+      const col = colHeaderStartCol + c;
+      const hasColLabel = c < labelsCapped.length;
+
+      const winCell = ws.getCell(topRow, col);
+      const lossCell = ws.getCell(topRow + 1, col);
+
+      // Always clear fills
+      winCell.getFormat().getFill().clear();
+      lossCell.getFormat().getFill().clear();
+
+      // Clear contents by default
+      winCell.clear(ExcelScript.ClearApplyTo.contents);
+      lossCell.clear(ExcelScript.ClearApplyTo.contents);
+
+      // If both row & column headers are present AND it’s diagonal, we’ll leave it blank for now.
+      // Your update functions will write totals (games/2) and recolor later.
+      // Nothing to pre-populate here.
+      // (Intentionally no-op)
+    }
+  }
+}
+
+function distinctNonEmpty(items: string[]): string[] {
+  const set = new Set<string>();
+  for (const s of items) {
+    const v = s.trim();
+    if (v) set.add(v);
+  }
+  return Array.from(set);
 }
 
 // --- ELO Calculation Helper ---

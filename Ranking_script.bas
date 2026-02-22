@@ -68,6 +68,9 @@ function ensurePrerequisites(workbook: ExcelScript.Workbook) {
     // Build/refresh the Winrates grid layout using the latest labels from Challengers cards
     rebuildWinratesLayoutFromChallengersCards(winrates, players);
 
+    // ✅ Enforce final sheet order
+    arrangeSheetsInOrder(workbook);
+
     return { matches, ratings, playersDataSheet: players, definition, winrates };
 }
 
@@ -185,6 +188,34 @@ function rebuildWinratesLayoutFromChallengersCards(
     /*rowHeaderStartRow*/ 50, /*rowHeaderStep*/ 2, /*maxRows*/ 8,
         roles
     );
+}
+
+/**
+ * Reorders the key sheets in a fixed order:
+ *  0: Leaderboard
+ *  1: Matches Log
+ *  2: Winrates
+ *  3: Challengers cards
+ *  4: Definition
+ *
+ * Safe to call repeatedly.
+ */
+function arrangeSheetsInOrder(workbook: ExcelScript.Workbook) {
+    const desired = [
+        "Leaderboard",
+        "Matches Log",
+        "Winrates",
+        "Challengers cards",
+        "Definition"
+    ];
+
+    // Move each sheet to its target index
+    desired.forEach((name, targetIndex) => {
+        const ws = workbook.getWorksheet(name);
+        if (ws) {
+            ws.setPosition(targetIndex);
+        }
+    });
 }
 
 /** Writes a single winrate matrix header block and clears the interior cells */
@@ -732,6 +763,42 @@ function updatePodiumViews(
         ratings.getCell(25, 12).setValue(Math.round(topRoles[2].avg));
         ratings.getCell(26, 12).setValue("🥉 3rd");
     }
+
+    // Ensure titles are present (safe to call every run)
+    writeLeaderboardSectionTitles(ratings);
+
+}
+
+
+/**
+ * Writes section titles on the Leaderboard sheet above each podium section.
+ * Places text in fixed cells that don't collide with the main table headers or data.
+ */
+function writeLeaderboardSectionTitles(ratings: ExcelScript.Worksheet) {
+    // Column K (0-based col 10) used for titles for visual grouping with podiums
+    const COL = 10;
+
+    // Player podium is around rows 5–8 → title above it
+    setTitleCell(ratings, /*row*/ 4, COL, "Leaderboard:");
+
+    // Country podium rows 11–14 → title above
+    setTitleCell(ratings, /*row*/ 10, COL, "Country Leaderboard");
+
+    // Team podium rows 17–20 → title above
+    setTitleCell(ratings, /*row*/ 16, COL, "Team Leaderboard");
+
+    // Role podium rows 23–26 → title above
+    setTitleCell(ratings, /*row*/ 22, COL, "Role Leaderboard");
+}
+
+/** Formats a single title cell: bold, larger font, and clear fills without touching other content. */
+function setTitleCell(ws: ExcelScript.Worksheet, row: number, col: number, text: string) {
+    const cell = ws.getCell(row, col);
+    cell.setValue(text);
+    const fmt = cell.getFormat();
+    fmt.getFont().setBold(true);
+    fmt.getFont().setSize(14);
+    fmt.getFill().clear();
 }
 
 // --- Winrates Matrix Wrapper ---
